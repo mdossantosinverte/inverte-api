@@ -6,100 +6,132 @@ app.use(cors());
 
 const BASE = "https://api.bybit.com";
 
-let stockCache = { data: null, lastFetch: 0 };
-const CACHE_TTL = 30_000;
+let stockCache     = { data: null, lastFetch: 0 };
+let xstockSymbols  = null; // cached set of confirmed xStock symbols
+const CACHE_TTL    = 30_000; // 30s price cache
+const SYMBOLS_TTL  = 3_600_000; // 1hr symbol cache
 
-// Known crypto tokens that happen to end in XUSDT — exclude these
-// This list is the ONLY filter. If a symbol ends in XUSDT and is NOT here, it's treated as an xStock.
-const CRYPTO_EXCLUSIONS = new Set([
-  "TRXUSDT","AVAXUSDT","ICXUSDT","HTXUSDT","IMXUSDT","MBOXUSDT","STXUSDT",
-  "MPLXUSDT","NAVXUSDT","SNXUSDT","WEMIXUSDT","DYDXUSDT","ZEXUSDT","FRAXUSDT",
-  "GMXUSDT","APEXUSDT","MBXUSDT","SPXUSDT","ZRXUSDT","FLUXUSDT","KLAYUSDT",
-  "MATICXUSDT","LINAXUSDT","HEXUSDT","INJXUSDT","APTXUSDT","STRKUSDT",
-  "PIXELUSDT","AXLUSDT","RDNTUSDT","LQTYUSDT","XVSUSDT","CAKEUSDT","BAKEUSDT",
-  "BELXUSDT","BSWUSDT","LUXUSDT","REXUSDT","NEXUSDT","VEXUSDT","TEXUSDT",
-  "SEXUSDT","DEXUSDT","NEXOUSDT","FOXUSDT","TRIXUSDT","MIXUSDT","FIXUSDT",
-  "SIXUSDT","NIXUSDT","WIXUSDT","PIXUSDT","KUJIXUSDT","MINIXUSDT",
-]);
+let symbolsCachedAt = 0;
 
-// NAMES is for display only — NOT used as a filter
-// Any xStock not listed here gets an auto-generated name
+// Display names — for UI only, NOT used for filtering
 const NAMES = {
-  AAPLX:   "Apple Inc.",
-  NVDAX:   "NVIDIA Corp.",
-  TSLAX:   "Tesla Inc.",
-  GOOGLX:  "Alphabet Inc.",
-  METAX:   "Meta Platforms",
-  AMZNX:   "Amazon.com Inc.",
-  MSFTX:   "Microsoft Corp.",
-  COINX:   "Coinbase Global",
-  HOODX:   "Robinhood Markets",
-  MCDX:    "McDonald's Corp.",
-  CRCLX:   "Circle Internet",
-  SPYX:    "SPDR S&P 500 ETF",
-  QQQX:    "Nasdaq-100 ETF",
-  IWMX:    "Russell 2000 ETF",
-  GLDX:    "SPDR Gold ETF",
-  SLVX:    "iShares Silver ETF",
-  AMDX:    "AMD Inc.",
-  INTCX:   "Intel Corp.",
-  NFLXX:   "Netflix Inc.",
-  UBERX:   "Uber Technologies",
-  SHOPX:   "Shopify Inc.",
-  VX:      "Visa Inc.",
-  MAX:     "Mastercard Inc.",
-  JPMX:    "JPMorgan Chase",
-  BACX:    "Bank of America",
-  DISX:    "Walt Disney Co.",
-  KOX:     "Coca-Cola Co.",
-  PFEX:    "Pfizer Inc.",
-  WMTX:    "Walmart Inc.",
-  XOMX:    "ExxonMobil Corp.",
-  MSTRX:   "MicroStrategy Inc.",
-  PLTRX:   "Palantir Tech.",
-  PYPLX:   "PayPal Holdings",
-  SQX:     "Block Inc.",
-  SNAPX:   "Snap Inc.",
-  SPOTX:   "Spotify Technology",
-  NKEX:    "Nike Inc.",
-  RIVNX:   "Rivian Automotive",
-  SOFIX:   "SoFi Technologies",
-  TSMX:    "TSMC",
-  ABBVX:   "AbbVie Inc.",
-  JNJX:    "Johnson & Johnson",
-  PGX:     "Procter & Gamble",
-  MRKX:    "Merck & Co.",
-  GSX:     "Goldman Sachs",
-  MSX:     "Morgan Stanley",
-  BLKX:    "BlackRock Inc.",
-  CATX:    "Caterpillar Inc.",
-  BAX:     "Boeing Co.",
-  LMTX:    "Lockheed Martin",
-  GEX:     "GE Aerospace",
-  FDXX:    "FedEx Corp.",
-  UPSX:    "UPS Inc.",
-  PANWX:   "Palo Alto Networks",
-  CRWDX:   "CrowdStrike",
-  SNOWX:   "Snowflake Inc.",
-  CLOUDX:  "Cloudflare Inc.",
-  QCOMX:   "Qualcomm Inc.",
-  TXNX:    "Texas Instruments",
-  COSTX:   "Costco Wholesale",
-  CVSX:    "CVS Health",
-  LLYX:    "Eli Lilly & Co.",
-  ORACLX:  "Oracle Corp.",
-  CRMX:    "Salesforce Inc.",
-  ADOBEX:  "Adobe Inc.",
-  SBUXХ:   "Starbucks Corp.",
-  ATNTX:   "AT&T Inc.",
-  VZWX:    "Verizon Comms.",
-  ABNBX:   "Airbnb Inc.",
-  BKNGX:   "Booking Holdings",
-  LYFTX:   "Lyft Inc.",
-  WDAYX:   "Workday Inc.",
-  SVCNX:   "ServiceNow Inc.",
-  AMGX:    "Amgen Inc.",
+  AAPLX:  "Apple Inc.",
+  NVDAX:  "NVIDIA Corp.",
+  TSLAX:  "Tesla Inc.",
+  GOOGLX: "Alphabet Inc.",
+  METAX:  "Meta Platforms",
+  AMZNX:  "Amazon.com Inc.",
+  MSFTX:  "Microsoft Corp.",
+  COINX:  "Coinbase Global",
+  HOODX:  "Robinhood Markets",
+  MCDX:   "McDonald's Corp.",
+  CRCLX:  "Circle Internet",
+  SPYX:   "SPDR S&P 500 ETF",
+  QQQX:   "Nasdaq-100 ETF",
+  IWMX:   "Russell 2000 ETF",
+  GLDX:   "SPDR Gold ETF",
+  SLVX:   "iShares Silver ETF",
+  AMDX:   "AMD Inc.",
+  INTCX:  "Intel Corp.",
+  NFLXX:  "Netflix Inc.",
+  UBERX:  "Uber Technologies",
+  SHOPX:  "Shopify Inc.",
+  VX:     "Visa Inc.",
+  MAX:    "Mastercard Inc.",
+  JPMX:   "JPMorgan Chase",
+  BACX:   "Bank of America",
+  DISX:   "Walt Disney Co.",
+  KOX:    "Coca-Cola Co.",
+  PFEX:   "Pfizer Inc.",
+  WMTX:   "Walmart Inc.",
+  XOMX:   "ExxonMobil Corp.",
+  MSTRX:  "MicroStrategy Inc.",
+  PLTRX:  "Palantir Tech.",
+  PYPLX:  "PayPal Holdings",
+  SQX:    "Block Inc.",
+  SNAPX:  "Snap Inc.",
+  SPOTX:  "Spotify Technology",
+  NKEX:   "Nike Inc.",
+  RIVNX:  "Rivian Automotive",
+  SOFIX:  "SoFi Technologies",
+  TSMX:   "TSMC",
+  ABBVX:  "AbbVie Inc.",
+  JNJX:   "Johnson & Johnson",
+  PGX:    "Procter & Gamble",
+  MRKX:   "Merck & Co.",
+  GSX:    "Goldman Sachs",
+  MSX:    "Morgan Stanley",
+  BLKX:   "BlackRock Inc.",
+  CATX:   "Caterpillar Inc.",
+  BAX:    "Boeing Co.",
+  LMTX:   "Lockheed Martin",
+  GEX:    "GE Aerospace",
+  FDXX:   "FedEx Corp.",
+  UPSX:   "UPS Inc.",
+  PANWX:  "Palo Alto Networks",
+  CRWDX:  "CrowdStrike",
+  SNOWX:  "Snowflake Inc.",
+  CLOUDX: "Cloudflare Inc.",
+  QCOMX:  "Qualcomm Inc.",
+  TXNX:   "Texas Instruments",
+  COSTX:  "Costco Wholesale",
+  CVSX:   "CVS Health",
+  LLYX:   "Eli Lilly & Co.",
+  ORACLX: "Oracle Corp.",
+  CRMX:   "Salesforce Inc.",
+  ADOBEX: "Adobe Inc.",
+  AMGX:   "Amgen Inc.",
+  WDAYX:  "Workday Inc.",
 };
+
+// Fetch xStock symbols dynamically from Bybit instruments-info
+// xStocks are in the "innovation" zone (innovation === "1") AND end with XUSDT
+// We also do a price sanity check (price must be > $1 to exclude micro-cap crypto)
+async function fetchXStockSymbols() {
+  if (xstockSymbols && Date.now() - symbolsCachedAt < SYMBOLS_TTL) {
+    return xstockSymbols;
+  }
+
+  try {
+    // Fetch instruments info — has the "innovation" flag
+    // Need pagination since there are 500+ spot instruments
+    let cursor = "";
+    const allInstruments = [];
+
+    do {
+      const url = `${BASE}/v5/market/instruments-info?category=spot&limit=500${cursor ? `&cursor=${cursor}` : ""}`;
+      const res  = await fetch(url);
+      const json = await res.json();
+      if (json.retCode !== 0) break;
+      allInstruments.push(...json.result.list);
+      cursor = json.result.nextPageCursor || "";
+    } while (cursor);
+
+    // xStocks: innovation zone + ends with XUSDT
+    const symbols = new Set(
+      allInstruments
+        .filter(i => i.innovation === "1" && i.symbol.endsWith("XUSDT"))
+        .map(i => i.symbol)
+    );
+
+    // Fallback: if we got nothing from innovation flag, use our known list
+    if (symbols.size === 0) {
+      console.warn("No innovation xStocks found, using fallback known list");
+      ["AAPLXUSDT","NVDAXUSDT","TSLAXUSDT","GOOGLXUSDT","METAXUSDT","AMZNXUSDT",
+       "COINXUSDT","HOODXUSDT","MCDXUSDT","CRCLXUSDT"].forEach(s => symbols.add(s));
+    }
+
+    xstockSymbols = symbols;
+    symbolsCachedAt = Date.now();
+    console.log(`✅ Found ${symbols.size} xStock symbols via instruments-info`);
+    return symbols;
+
+  } catch (err) {
+    console.error("fetchXStockSymbols error:", err.message);
+    // Return last cached or empty set
+    return xstockSymbols || new Set();
+  }
+}
 
 const XSTOCKS_LAUNCH_MS = new Date("2025-06-30").getTime();
 
@@ -114,13 +146,12 @@ function getIntervalConfig(range) {
     case "6M":  return { interval: "D",   limit: 180 };
     case "YTD": {
       const jan1 = new Date(new Date().getFullYear(), 0, 1).getTime();
-      const startFrom = Math.max(jan1, XSTOCKS_LAUNCH_MS);
-      const days = Math.ceil((now - startFrom) / day);
+      const days = Math.ceil((now - Math.max(jan1, XSTOCKS_LAUNCH_MS)) / day);
       return { interval: "D", limit: Math.max(days, 1) };
     }
     case "1Y": {
-      const daysSinceLaunch = Math.ceil((now - XSTOCKS_LAUNCH_MS) / day);
-      return { interval: "D", limit: Math.min(daysSinceLaunch + 5, 365) };
+      const days = Math.ceil((now - XSTOCKS_LAUNCH_MS) / day);
+      return { interval: "D", limit: Math.min(days + 5, 365) };
     }
     case "ALL": return { interval: "D", limit: 300 };
     default:    return { interval: "D", limit: 30  };
@@ -128,7 +159,7 @@ function getIntervalConfig(range) {
 }
 
 app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "Inverte API", version: "7.0.0" });
+  res.json({ status: "ok", service: "Inverte API", version: "8.0.0" });
 });
 
 app.get("/stocks", async (req, res) => {
@@ -137,6 +168,10 @@ app.get("/stocks", async (req, res) => {
       return res.json({ source: "cache", count: stockCache.data.length, data: stockCache.data });
     }
 
+    // Get the confirmed xStock symbol set from Bybit
+    const xstockSet = await fetchXStockSymbols();
+
+    // Get live prices
     const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
     const json = await response.json();
     if (json.retCode !== 0) throw new Error(json.retMsg);
@@ -144,28 +179,19 @@ app.get("/stocks", async (req, res) => {
     const stocks = [];
     for (const item of json.result.list) {
       const sym = item.symbol;
+      if (!xstockSet.has(sym)) continue;
 
-      // Must end with XUSDT
-      if (!sym.endsWith("XUSDT")) continue;
-
-      // Must NOT be a known crypto token
-      if (CRYPTO_EXCLUSIONS.has(sym)) continue;
-
-      // Must have an active price
       const price = parseFloat(item.lastPrice) || 0;
-      if (price === 0) continue;
+      if (price < 1) continue; // sanity check — real stocks are > $1
 
       const ticker  = sym.replace("USDT", "");
       const prev    = parseFloat(item.prevPrice24h) || price;
       const changeP = parseFloat(item.price24hPcnt) * 100 || 0;
 
-      // Auto-generate name if not in our display list
-      const autoName = ticker.replace(/X$/, "").replace(/([A-Z])/g, "$1").trim() + " Stock";
-
       stocks.push({
         symbol:    sym,
         ticker,
-        name:      NAMES[ticker] || autoName,
+        name:      NAMES[ticker] || ticker.replace(/X$/, "") + " Stock",
         price,
         change:    price - prev,
         changeP,
@@ -175,10 +201,8 @@ app.get("/stocks", async (req, res) => {
       });
     }
 
-    // Sort: known names first, then by ticker
     stocks.sort((a, b) => {
-      const aK = !!NAMES[a.ticker];
-      const bK = !!NAMES[b.ticker];
+      const aK = !!NAMES[a.ticker], bK = !!NAMES[b.ticker];
       if (aK && !bK) return -1;
       if (!aK && bK) return 1;
       return a.ticker.localeCompare(b.ticker);
@@ -197,11 +221,9 @@ app.get("/stocks", async (req, res) => {
 app.get("/candles/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
-    const range = req.query.range || "1M";
-    const cfg   = getIntervalConfig(range);
-    const url   = `${BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${cfg.interval}&limit=${cfg.limit}`;
-    const response = await fetch(url);
-    const json = await response.json();
+    const cfg = getIntervalConfig(req.query.range || "1M");
+    const res2 = await fetch(`${BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${cfg.interval}&limit=${cfg.limit}`);
+    const json = await res2.json();
     if (json.retCode !== 0) throw new Error(json.retMsg);
     const candles = json.result.list.reverse().map(c => ({
       time: parseInt(c[0]), open: parseFloat(c[1]),
@@ -216,8 +238,8 @@ app.get("/candles/:symbol", async (req, res) => {
 app.get("/ticker/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
-    const response = await fetch(`${BASE}/v5/market/tickers?category=spot&symbol=${symbol}`);
-    const json = await response.json();
+    const res2 = await fetch(`${BASE}/v5/market/tickers?category=spot&symbol=${symbol}`);
+    const json = await res2.json();
     if (json.retCode !== 0) throw new Error(json.retMsg);
     const item  = json.result.list[0];
     const price = parseFloat(item.lastPrice) || 0;
@@ -234,21 +256,31 @@ app.get("/ticker/:symbol", async (req, res) => {
   }
 });
 
-// Debug — shows ALL xStock symbols currently active on Bybit
+// Debug — shows raw instruments-info results
 app.get("/debug", async (req, res) => {
   try {
-    const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
-    const json = await response.json();
-    const all = json.result.list
-      .filter(i => i.symbol.endsWith("XUSDT") && parseFloat(i.lastPrice) > 0)
-      .map(i => ({ symbol: i.symbol, ticker: i.symbol.replace("USDT",""), price: parseFloat(i.lastPrice), excluded: CRYPTO_EXCLUSIONS.has(i.symbol) }));
-    const xstocks = all.filter(i => !i.excluded);
-    const excluded = all.filter(i => i.excluded);
-    res.json({ xstockCount: xstocks.length, xstocks, excludedCount: excluded.length, excluded });
+    const symbols = await fetchXStockSymbols();
+    res.json({
+      count: symbols.size,
+      symbols: [...symbols].sort(),
+      cachedAt: new Date(symbolsCachedAt).toISOString(),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// Force refresh the symbol cache
+app.get("/refresh-symbols", async (req, res) => {
+  symbolsCachedAt = 0;
+  xstockSymbols = null;
+  const symbols = await fetchXStockSymbols();
+  res.json({ count: symbols.size, symbols: [...symbols].sort() });
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Inverte API v7 on port ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`✅ Inverte API v8 on port ${PORT}`);
+  // Pre-warm the symbol cache on startup
+  await fetchXStockSymbols();
+});
