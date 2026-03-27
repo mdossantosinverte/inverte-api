@@ -10,37 +10,39 @@ const BASE = "https://api.bybit.com";
 let cache = { stocks: null, lastFetch: 0 };
 const CACHE_TTL = 30_000; // 30 seconds
 
+// xStock symbols on Bybit end with X, e.g. AAPLX, NVDAX, TSLAX
+// Trading pairs are AAPLXUSDT, NVDAXUSDT, etc.
 const NAMES = {
-  xAAPL:  "Apple Inc.",
-  xNVDA:  "NVIDIA Corp.",
-  xTSLA:  "Tesla Inc.",
-  xGOOGL: "Alphabet Inc.",
-  xMETA:  "Meta Platforms",
-  xAMZN:  "Amazon.com",
-  xMSFT:  "Microsoft Corp.",
-  xCOIN:  "Coinbase Global",
-  xHOOD:  "Robinhood Markets",
-  xMCD:   "McDonald's Corp.",
-  xCRCL:  "Circle Internet",
-  xSPY:   "S&P 500 ETF",
-  xQQQ:   "Nasdaq-100 ETF",
-  xIWM:   "Russell 2000 ETF",
-  xGLD:   "Gold ETF",
-  xSLV:   "Silver ETF",
-  xAMD:   "AMD Inc.",
-  xINTC:  "Intel Corp.",
-  xNFLX:  "Netflix Inc.",
-  xUBER:  "Uber Technologies",
-  xSHOP:  "Shopify Inc.",
-  xV:     "Visa Inc.",
-  xMA:    "Mastercard Inc.",
-  xJPM:   "JPMorgan Chase",
-  xBAC:   "Bank of America",
-  xDIS:   "Walt Disney Co.",
-  xKO:    "Coca-Cola Co.",
-  xPFE:   "Pfizer Inc.",
-  xWMT:   "Walmart Inc.",
-  xXOM:   "ExxonMobil Corp.",
+  AAPLX:  "Apple Inc.",
+  NVDAX:  "NVIDIA Corp.",
+  TSLAX:  "Tesla Inc.",
+  GOOGLX: "Alphabet Inc.",
+  METAX:  "Meta Platforms",
+  AMZNX:  "Amazon.com",
+  MSFTX:  "Microsoft Corp.",
+  COINX:  "Coinbase Global",
+  HOODX:  "Robinhood Markets",
+  MCDX:   "McDonald's Corp.",
+  CRCLX:  "Circle Internet",
+  SPYX:   "S&P 500 ETF",
+  QQQX:   "Nasdaq-100 ETF",
+  IWMX:   "Russell 2000 ETF",
+  GLDX:   "Gold ETF",
+  SLVX:   "Silver ETF",
+  AMDX:   "AMD Inc.",
+  INTCX:  "Intel Corp.",
+  NFLXX:  "Netflix Inc.",
+  UBERX:  "Uber Technologies",
+  SHOPX:  "Shopify Inc.",
+  VX:     "Visa Inc.",
+  MAX:    "Mastercard Inc.",
+  JPMX:   "JPMorgan Chase",
+  BACX:   "Bank of America",
+  DISX:   "Walt Disney Co.",
+  KOX:    "Coca-Cola Co.",
+  PFEX:   "Pfizer Inc.",
+  WBTX:   "Walmart Inc.",
+  XOMX:   "ExxonMobil Corp.",
 };
 
 // Health check
@@ -64,9 +66,10 @@ app.get("/stocks", async (req, res) => {
     const stocks = [];
     for (const item of json.result.list) {
       const sym = item.symbol;
-      if (!sym.startsWith("x") || !sym.endsWith("USDT")) continue;
+      // xStocks end with XUSDT, e.g. AAPLXUSDT, NVDAXUSDT
+      if (!sym.endsWith("XUSDT")) continue;
 
-      const ticker   = sym.replace("USDT", "");
+      const ticker   = sym.replace("USDT", ""); // e.g. AAPLX
       const price    = parseFloat(item.lastPrice)    || 0;
       const prev     = parseFloat(item.prevPrice24h) || price;
       const changeP  = parseFloat(item.price24hPcnt) * 100 || 0;
@@ -74,7 +77,7 @@ app.get("/stocks", async (req, res) => {
       stocks.push({
         symbol:    sym,
         ticker,
-        name:      NAMES[ticker] ?? ticker.replace("x", "") + " Stock",
+        name:      NAMES[ticker] ?? ticker.replace("X", "") + " Stock",
         price,
         change:    price - prev,
         changeP,
@@ -98,7 +101,6 @@ app.get("/stocks", async (req, res) => {
 
   } catch (err) {
     console.error("GET /stocks error:", err.message);
-    // Return stale cache if available
     if (cache.stocks) return res.json({ source: "stale", data: cache.stocks });
     res.status(500).json({ error: err.message });
   }
@@ -168,6 +170,15 @@ app.get("/ticker/:symbol", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+// Debug — see raw Bybit response
+app.get("/debug", async (req, res) => {
+  const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
+  const json = await response.json();
+  const sample = json.result.list.slice(0, 20).map(i => i.symbol);
+  res.json({ total: json.result.list.length, sample });
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Inverte API running on port ${PORT}`);
 });
