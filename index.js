@@ -9,7 +9,8 @@ const BASE = "https://api.bybit.com";
 let stockCache = { data: null, lastFetch: 0 };
 const CACHE_TTL = 30_000;
 
-// Known crypto tokens that end in XUSDT — must exclude these
+// Known crypto tokens that happen to end in XUSDT — exclude these
+// This list is the ONLY filter. If a symbol ends in XUSDT and is NOT here, it's treated as an xStock.
 const CRYPTO_EXCLUSIONS = new Set([
   "TRXUSDT","AVAXUSDT","ICXUSDT","HTXUSDT","IMXUSDT","MBOXUSDT","STXUSDT",
   "MPLXUSDT","NAVXUSDT","SNXUSDT","WEMIXUSDT","DYDXUSDT","ZEXUSDT","FRAXUSDT",
@@ -19,10 +20,10 @@ const CRYPTO_EXCLUSIONS = new Set([
   "BELXUSDT","BSWUSDT","LUXUSDT","REXUSDT","NEXUSDT","VEXUSDT","TEXUSDT",
   "SEXUSDT","DEXUSDT","NEXOUSDT","FOXUSDT","TRIXUSDT","MIXUSDT","FIXUSDT",
   "SIXUSDT","NIXUSDT","WIXUSDT","PIXUSDT","KUJIXUSDT","MINIXUSDT",
-  "SHIBXUSDT","DOGEXUSDT","FLOKIXUSDT","PEPEХUSDT",
 ]);
 
-// Display names for known xStocks
+// NAMES is for display only — NOT used as a filter
+// Any xStock not listed here gets an auto-generated name
 const NAMES = {
   AAPLX:   "Apple Inc.",
   NVDAX:   "NVIDIA Corp.",
@@ -83,40 +84,28 @@ const NAMES = {
   CLOUDX:  "Cloudflare Inc.",
   QCOMX:   "Qualcomm Inc.",
   TXNX:    "Texas Instruments",
-  AMGX:    "Amgen Inc.",
-  COST X:  "Costco Wholesale",
+  COSTX:   "Costco Wholesale",
   CVSX:    "CVS Health",
-  LLYХ:    "Eli Lilly & Co.",
+  LLYX:    "Eli Lilly & Co.",
   ORACLX:  "Oracle Corp.",
   CRMX:    "Salesforce Inc.",
   ADOBEX:  "Adobe Inc.",
-  NKEX:    "Nike Inc.",
   SBUXХ:   "Starbucks Corp.",
-  TMX:     "T-Mobile US",
   ATNTX:   "AT&T Inc.",
   VZWX:    "Verizon Comms.",
-  INTUX:   "Intuitive Surgical",
-  ISRGX:   "ISRG Inc.",
-  DHRX:    "Danaher Corp.",
-  MDTX:    "Medtronic PLC",
   ABNBX:   "Airbnb Inc.",
   BKNGX:   "Booking Holdings",
-  EXPDX:   "Expedia Group",
   LYFTX:   "Lyft Inc.",
-  RBLXX:   "Roblox Corp.",
-  ZOOMX:   "Zoom Video",
-  DOCSGNX: "DocuSign Inc.",
   WDAYX:   "Workday Inc.",
   SVCNX:   "ServiceNow Inc.",
+  AMGX:    "Amgen Inc.",
 };
 
-// xStocks launched June 30, 2025
 const XSTOCKS_LAUNCH_MS = new Date("2025-06-30").getTime();
 
 function getIntervalConfig(range) {
   const now = Date.now();
   const day = 86400000;
-
   switch (range) {
     case "1D":  return { interval: "60",  limit: 24  };
     case "1W":  return { interval: "240", limit: 42  };
@@ -130,26 +119,22 @@ function getIntervalConfig(range) {
       return { interval: "D", limit: Math.max(days, 1) };
     }
     case "1Y": {
-      // xStocks only exist since Jun 2025 (~10 months)
-      // Return all daily data since launch — effectively same as ALL
       const daysSinceLaunch = Math.ceil((now - XSTOCKS_LAUNCH_MS) / day);
       return { interval: "D", limit: Math.min(daysSinceLaunch + 5, 365) };
     }
-    case "ALL":
-      return { interval: "D", limit: 300 };
-    default:
-      return { interval: "D", limit: 30 };
+    case "ALL": return { interval: "D", limit: 300 };
+    default:    return { interval: "D", limit: 30  };
   }
 }
 
 app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "Inverte API", version: "6.0.0" });
+  res.json({ status: "ok", service: "Inverte API", version: "7.0.0" });
 });
 
 app.get("/stocks", async (req, res) => {
   try {
     if (stockCache.data && Date.now() - stockCache.lastFetch < CACHE_TTL) {
-      return res.json({ source: "cache", data: stockCache.data });
+      return res.json({ source: "cache", count: stockCache.data.length, data: stockCache.data });
     }
 
     const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
@@ -159,20 +144,28 @@ app.get("/stocks", async (req, res) => {
     const stocks = [];
     for (const item of json.result.list) {
       const sym = item.symbol;
-      if (CRYPTO_EXCLUSIONS.has(sym)) continue;
+
+      // Must end with XUSDT
       if (!sym.endsWith("XUSDT")) continue;
 
+      // Must NOT be a known crypto token
+      if (CRYPTO_EXCLUSIONS.has(sym)) continue;
+
+      // Must have an active price
       const price = parseFloat(item.lastPrice) || 0;
-      if (price === 0) continue; // skip inactive
+      if (price === 0) continue;
 
       const ticker  = sym.replace("USDT", "");
       const prev    = parseFloat(item.prevPrice24h) || price;
       const changeP = parseFloat(item.price24hPcnt) * 100 || 0;
 
+      // Auto-generate name if not in our display list
+      const autoName = ticker.replace(/X$/, "").replace(/([A-Z])/g, "$1").trim() + " Stock";
+
       stocks.push({
         symbol:    sym,
         ticker,
-        name:      NAMES[ticker] ?? ticker.replace(/X$/, "") + " Stock",
+        name:      NAMES[ticker] || autoName,
         price,
         change:    price - prev,
         changeP,
@@ -182,8 +175,10 @@ app.get("/stocks", async (req, res) => {
       });
     }
 
+    // Sort: known names first, then by ticker
     stocks.sort((a, b) => {
-      const aK = !!NAMES[a.ticker], bK = !!NAMES[b.ticker];
+      const aK = !!NAMES[a.ticker];
+      const bK = !!NAMES[b.ticker];
       if (aK && !bK) return -1;
       if (!aK && bK) return 1;
       return a.ticker.localeCompare(b.ticker);
@@ -212,7 +207,7 @@ app.get("/candles/:symbol", async (req, res) => {
       time: parseInt(c[0]), open: parseFloat(c[1]),
       high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]),
     }));
-    res.json({ data: candles, launchDate: XSTOCKS_LAUNCH_MS });
+    res.json({ data: candles });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -239,19 +234,21 @@ app.get("/ticker/:symbol", async (req, res) => {
   }
 });
 
-// Debug endpoint — shows exactly what xStocks are active on Bybit right now
+// Debug — shows ALL xStock symbols currently active on Bybit
 app.get("/debug", async (req, res) => {
   try {
     const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
     const json = await response.json();
     const all = json.result.list
-      .filter(i => i.symbol.endsWith("XUSDT") && !CRYPTO_EXCLUSIONS.has(i.symbol) && parseFloat(i.lastPrice) > 0)
-      .map(i => ({ symbol: i.symbol, ticker: i.symbol.replace("USDT",""), price: parseFloat(i.lastPrice) }));
-    res.json({ count: all.length, xstocks: all });
+      .filter(i => i.symbol.endsWith("XUSDT") && parseFloat(i.lastPrice) > 0)
+      .map(i => ({ symbol: i.symbol, ticker: i.symbol.replace("USDT",""), price: parseFloat(i.lastPrice), excluded: CRYPTO_EXCLUSIONS.has(i.symbol) }));
+    const xstocks = all.filter(i => !i.excluded);
+    const excluded = all.filter(i => i.excluded);
+    res.json({ xstockCount: xstocks.length, xstocks, excludedCount: excluded.length, excluded });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Inverte API v6 on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Inverte API v7 on port ${PORT}`));
