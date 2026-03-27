@@ -66,18 +66,17 @@ app.get("/stocks", async (req, res) => {
     const stocks = [];
     for (const item of json.result.list) {
       const sym = item.symbol;
-      // xStocks end with XUSDT, e.g. AAPLXUSDT, NVDAXUSDT
-      if (!sym.endsWith("XUSDT")) continue;
+      const ticker = sym.replace("USDT", "");
+      if (!NAMES[ticker]) continue;
 
-      const ticker   = sym.replace("USDT", ""); // e.g. AAPLX
-      const price    = parseFloat(item.lastPrice)    || 0;
-      const prev     = parseFloat(item.prevPrice24h) || price;
-      const changeP  = parseFloat(item.price24hPcnt) * 100 || 0;
+      const price   = parseFloat(item.lastPrice)    || 0;
+      const prev    = parseFloat(item.prevPrice24h) || price;
+      const changeP = parseFloat(item.price24hPcnt) * 100 || 0;
 
       stocks.push({
         symbol:    sym,
         ticker,
-        name:      NAMES[ticker] ?? ticker.replace("X", "") + " Stock",
+        name:      NAMES[ticker],
         price,
         change:    price - prev,
         changeP,
