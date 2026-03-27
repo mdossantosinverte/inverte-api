@@ -9,16 +9,19 @@ const BASE = "https://api.bybit.com";
 let stockCache = { data: null, lastFetch: 0 };
 const CACHE_TTL = 30_000;
 
+// Known crypto tokens that happen to end in XUSDT — exclude these
 const CRYPTO_EXCLUSIONS = new Set([
   "TRXUSDT","AVAXUSDT","ICXUSDT","HTXUSDT","IMXUSDT","MBOXUSDT","STXUSDT",
   "MPLXUSDT","NAVXUSDT","SNXUSDT","WEMIXUSDT","DYDXUSDT","ZEXUSDT","FRAXUSDT",
   "GMXUSDT","APEXUSDT","MBXUSDT","SPXUSDT","ZRXUSDT","FLUXUSDT","KLAYUSDT",
-  "MATICXUSDT","LINAXUSDT","HEXUSDT","SHIBXUSDT","INJXUSDT","APTXUSDT",
-  "STRKUSDT","PIXELUSDT","AXLUSDT","RDNTUSDT","LQTYUSDT","XVSUSDT","CAKEUSDT",
-  "BAKEUSDT","BELXUSDT","BSWUSDT","TUSDT","LUXUSDT","REXUSDT","NEXUSDT",
-  "VEXUSDT","TEXUSDT","SEXUSDT","HEXUSDT","DEXUSDT","NEXOUSDT",
+  "MATICXUSDT","LINAXUSDT","HEXUSDT","INJXUSDT","APTXUSDT","STRKUSDT",
+  "PIXELUSDT","AXLUSDT","RDNTUSDT","LQTYUSDT","XVSUSDT","CAKEUSDT","BAKEUSDT",
+  "BELXUSDT","BSWUSDT","LUXUSDT","REXUSDT","NEXUSDT","VEXUSDT","TEXUSDT",
+  "SEXUSDT","DEXUSDT","NEXOUSDT","KUJIXUSDT","MINIXUSDT","FOXUSDT",
+  "TRIXUSDT","MIXUSDT","FIXUSDT","SIXUSDT","NIXUSDT","WIXUSDT","PIXUSDT",
 ]);
 
+// Known xStock names for display
 const NAMES = {
   AAPLX:   "Apple Inc.",
   NVDAX:   "NVIDIA Corp.",
@@ -61,7 +64,6 @@ const NAMES = {
   SOFIX:   "SoFi Technologies",
   TSMX:    "TSMC",
   ABBVX:   "AbbVie Inc.",
-  LLYХ:    "Eli Lilly & Co.",
   JNJX:    "Johnson & Johnson",
   PGX:     "Procter & Gamble",
   MRKX:    "Merck & Co.",
@@ -78,40 +80,40 @@ const NAMES = {
   CRWDX:   "CrowdStrike",
   SNOWX:   "Snowflake Inc.",
   CLOUDX:  "Cloudflare Inc.",
-  WDAYX:   "Workday Inc.",
   QCOMX:   "Qualcomm Inc.",
   TXNX:    "Texas Instruments",
 };
 
-// Correct interval mapping for Bybit
-// Bybit kline intervals: 1,3,5,15,30,60,120,240,360,720,D,W,M
-// We compute "from" timestamp for accurate date ranges
+// xStocks launched June 30, 2025 — no data exists before this
+const XSTOCKS_LAUNCH_MS = new Date("2025-06-30").getTime();
+
 function getIntervalConfig(range) {
   const now = Date.now();
   const day  = 86400000;
-  const week = day * 7;
 
   switch (range) {
-    case "1D":  return { interval: "60",  limit: 24  }; // 24 x 1hr = 1 day
-    case "1W":  return { interval: "240", limit: 42  }; // 42 x 4hr = ~1 week
-    case "1M":  return { interval: "D",   limit: 30  }; // 30 daily
-    case "3M":  return { interval: "D",   limit: 90  }; // 90 daily
-    case "6M":  return { interval: "D",   limit: 180 }; // 180 daily
+    case "1D":  return { interval: "60",  limit: 24  };
+    case "1W":  return { interval: "240", limit: 42  };
+    case "1M":  return { interval: "D",   limit: 30  };
+    case "3M":  return { interval: "D",   limit: 90  };
+    case "6M":  return { interval: "D",   limit: 180 };
     case "YTD": {
-      // Days from Jan 1 of current year to today
       const jan1 = new Date(new Date().getFullYear(), 0, 1).getTime();
-      const daysSinceJan1 = Math.ceil((now - jan1) / day);
-      return { interval: "D", limit: Math.max(daysSinceJan1, 1) };
+      // Cap at launch date — no data before Jun 2025
+      const startFrom = Math.max(jan1, XSTOCKS_LAUNCH_MS);
+      const days = Math.ceil((now - startFrom) / day);
+      return { interval: "D", limit: Math.max(days, 1) };
     }
-    case "1Y":  return { interval: "W",   limit: 52  }; // 52 weekly = 1 year
-    case "5Y":  return { interval: "W",   limit: 260 }; // 260 weekly = 5 years
-    case "MAX": return { interval: "M",   limit: 60  }; // 60 monthly = 5 years max available
-    default:    return { interval: "D",   limit: 30  };
+    case "ALL": // All available data since launch
+    case "MAX":
+      return { interval: "D", limit: 300 }; // ~10 months of daily data
+    default:
+      return { interval: "D", limit: 30 };
   }
 }
 
 app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "Inverte API", version: "4.0.0" });
+  res.json({ status: "ok", service: "Inverte API", version: "5.0.0" });
 });
 
 app.get("/stocks", async (req, res) => {
@@ -128,14 +130,15 @@ app.get("/stocks", async (req, res) => {
     for (const item of json.result.list) {
       const sym = item.symbol;
       if (CRYPTO_EXCLUSIONS.has(sym)) continue;
-      const ticker = sym.replace("USDT", "");
-      const isKnown = !!NAMES[ticker];
-      const looksLikeXStock = sym.endsWith("XUSDT") && !CRYPTO_EXCLUSIONS.has(sym);
-      if (!isKnown && !looksLikeXStock) continue;
+      if (!sym.endsWith("XUSDT")) continue;
 
+      const ticker = sym.replace("USDT", "");
       const price   = parseFloat(item.lastPrice)    || 0;
       const prev    = parseFloat(item.prevPrice24h) || price;
       const changeP = parseFloat(item.price24hPcnt) * 100 || 0;
+
+      // Skip tokens with 0 price (not actively trading)
+      if (price === 0) continue;
 
       stocks.push({
         symbol:    sym,
@@ -188,7 +191,7 @@ app.get("/candles/:symbol", async (req, res) => {
         close: parseFloat(c[4]),
       }));
 
-    res.json({ data: candles });
+    res.json({ data: candles, launchDate: XSTOCKS_LAUNCH_MS });
   } catch (err) {
     console.error("GET /candles error:", err.message);
     res.status(500).json({ error: err.message });
@@ -205,8 +208,7 @@ app.get("/ticker/:symbol", async (req, res) => {
     const price = parseFloat(item.lastPrice) || 0;
     const prev  = parseFloat(item.prevPrice24h) || price;
     res.json({ data: {
-      price,
-      change:    price - prev,
+      price, change: price - prev,
       changeP:   parseFloat(item.price24hPcnt) * 100 || 0,
       high24h:   parseFloat(item.highPrice24h) || 0,
       low24h:    parseFloat(item.lowPrice24h)  || 0,
@@ -220,10 +222,11 @@ app.get("/ticker/:symbol", async (req, res) => {
 app.get("/debug", async (req, res) => {
   const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
   const json = await response.json();
-  const all = json.result.list.map(i => i.symbol);
-  const xstocks = all.filter(s => s.endsWith("XUSDT") && !CRYPTO_EXCLUSIONS.has(s));
-  res.json({ count: xstocks.length, xstocks });
+  const all = json.result.list
+    .filter(i => i.symbol.endsWith("XUSDT") && !CRYPTO_EXCLUSIONS.has(i.symbol) && parseFloat(i.lastPrice) > 0)
+    .map(i => i.symbol);
+  res.json({ count: all.length, symbols: all });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Inverte API v4 on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Inverte API v5 on port ${PORT}`));
