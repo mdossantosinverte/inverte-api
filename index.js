@@ -6,29 +6,30 @@ app.use(cors());
 
 const BASE = "https://api.bybit.com";
 
-// Cache to avoid hammering Bybit
-let cache = { stocks: null, lastFetch: 0 };
+// Cache
+let stockCache = { data: null, lastFetch: 0 };
+let symbolCache = null; // xStock symbols — fetched once
 const CACHE_TTL = 30_000; // 30 seconds
 
-// xStock symbols on Bybit end with X, e.g. AAPLX, NVDAX, TSLAX
-// Trading pairs are AAPLXUSDT, NVDAXUSDT, etc.
+// Known xStock names — used for display
+// Any symbol NOT in this list will use auto-generated name
 const NAMES = {
   AAPLX:  "Apple Inc.",
   NVDAX:  "NVIDIA Corp.",
   TSLAX:  "Tesla Inc.",
   GOOGLX: "Alphabet Inc.",
   METAX:  "Meta Platforms",
-  AMZNX:  "Amazon.com",
+  AMZNX:  "Amazon.com Inc.",
   MSFTX:  "Microsoft Corp.",
   COINX:  "Coinbase Global",
   HOODX:  "Robinhood Markets",
   MCDX:   "McDonald's Corp.",
   CRCLX:  "Circle Internet",
-  SPYX:   "S&P 500 ETF",
+  SPYX:   "SPDR S&P 500 ETF",
   QQQX:   "Nasdaq-100 ETF",
   IWMX:   "Russell 2000 ETF",
-  GLDX:   "Gold ETF",
-  SLVX:   "Silver ETF",
+  GLDX:   "SPDR Gold ETF",
+  SLVX:   "iShares Silver ETF",
   AMDX:   "AMD Inc.",
   INTCX:  "Intel Corp.",
   NFLXX:  "Netflix Inc.",
@@ -41,42 +42,126 @@ const NAMES = {
   DISX:   "Walt Disney Co.",
   KOX:    "Coca-Cola Co.",
   PFEX:   "Pfizer Inc.",
-  WBTX:   "Walmart Inc.",
+  WMTX:   "Walmart Inc.",
   XOMX:   "ExxonMobil Corp.",
+  BRKBX:  "Berkshire Hathaway",
+  LLYХ:   "Eli Lilly & Co.",
+  JNJX:   "Johnson & Johnson",
+  PGX:    "Procter & Gamble",
+  UNITX:  "UnitedHealth Group",
+  EXXONX: "ExxonMobil Corp.",
+  ABBVX:  "AbbVie Inc.",
+  CSBOX:  "Costco Wholesale",
+  MRKX:   "Merck & Co.",
+  CVSX:   "CVS Health",
+  ORACLX: "Oracle Corp.",
+  CRMX:   "Salesforce Inc.",
+  ADOBEX: "Adobe Inc.",
+  ACNX:   "Accenture PLC",
+  TMX:    "T-Mobile US",
+  NKEX:   "Nike Inc.",
+  SBUXХ:  "Starbucks Corp.",
+  MCDX:   "McDonald's Corp.",
+  CMCSAX: "Comcast Corp.",
+  TXNX:   "Texas Instruments",
+  QCOMX:  "Qualcomm Inc.",
+  AMGНX:  "Amgen Inc.",
+  GSX:    "Goldman Sachs",
+  MSX:    "Morgan Stanley",
+  BLKX:   "BlackRock Inc.",
+  SPGIX:  "S&P Global Inc.",
+  CATX:   "Caterpillar Inc.",
+  DEX:    "Deere & Company",
+  HONX:   "Honeywell Intl.",
+  MMМX:   "3M Company",
+  GEX:    "General Electric",
+  RTXX:   "Raytheon Tech.",
+  BAX:    "Boeing Co.",
+  LMTX:   "Lockheed Martin",
+  FDXX:   "FedEx Corp.",
+  UPSX:   "UPS Inc.",
 };
+
+// Fetch the list of xStock symbols from Bybit instrument info
+// xStocks are tagged in the "innovation" zone on Bybit
+async function getXStockSymbols() {
+  if (symbolCache) return symbolCache;
+  try {
+    const res  = await fetch(`${BASE}/v5/market/instruments-info?category=spot&status=Trading`);
+    const json = await res.json();
+    if (json.retCode !== 0) throw new Error(json.retMsg);
+
+    // Filter symbols that are in the "XSTOCK" or innovation zone
+    // Also match against our known list + pattern: ticker ends with X + USDT
+    const known = new Set(Object.keys(NAMES).map(k => k + "USDT"));
+    const symbols = new Set();
+
+    for (const item of json.result.list) {
+      const sym = item.symbol;
+      // Include if it's in our known list
+      if (known.has(sym)) { symbols.add(sym); continue; }
+      // Or if innovation tag contains xstock
+      if (item.innovation === "1" && sym.endsWith("XUSDT")) {
+        // Exclude known crypto tokens that happen to end in XUSDT
+        const cryptoExclusions = new Set([
+          "TRXUSDT","AVAXUSDT","ICXUSDT","HTXUSDT","IMXUSDT",
+          "MBOXUSDT","STXUSDT","MPLXUSDT","NAVXUSDT","SNXUSDT",
+          "WEMIXUSDT","DYDXUSDT","ZEXUSDT","FRAXUSDT","GMXUSDT",
+          "APEXUSDT","MBXUSDT","SPXUSDT","ZRXUSDT",
+        ]);
+        if (!cryptoExclusions.has(sym)) symbols.add(sym);
+      }
+    }
+
+    symbolCache = [...symbols];
+    console.log(`Found ${symbolCache.length} xStock symbols:`, symbolCache);
+    return symbolCache;
+  } catch (err) {
+    console.error("getXStockSymbols error:", err.message);
+    // Fall back to known list
+    return Object.keys(NAMES).map(k => k + "USDT");
+  }
+}
 
 // Health check
 app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "Inverte API", version: "1.0.0" });
+  res.json({ status: "ok", service: "Inverte API", version: "2.0.0" });
 });
 
 // All xStocks with live prices
 app.get("/stocks", async (req, res) => {
   try {
-    // Return cached data if fresh
-    if (cache.stocks && Date.now() - cache.lastFetch < CACHE_TTL) {
-      return res.json({ source: "cache", data: cache.stocks });
+    if (stockCache.data && Date.now() - stockCache.lastFetch < CACHE_TTL) {
+      return res.json({ source: "cache", data: stockCache.data });
     }
 
-    const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
-    const json = await response.json();
+    const [tickerRes, xStockSymbols] = await Promise.all([
+      fetch(`${BASE}/v5/market/tickers?category=spot`),
+      getXStockSymbols(),
+    ]);
 
+    const json = await tickerRes.json();
     if (json.retCode !== 0) throw new Error(json.retMsg);
 
+    const symbolSet = new Set(xStockSymbols);
     const stocks = [];
+
     for (const item of json.result.list) {
       const sym = item.symbol;
-      const ticker = sym.replace("USDT", "");
-      if (!NAMES[ticker]) continue;
+      if (!symbolSet.has(sym)) continue;
 
-      const price   = parseFloat(item.lastPrice)    || 0;
-      const prev    = parseFloat(item.prevPrice24h) || price;
-      const changeP = parseFloat(item.price24hPcnt) * 100 || 0;
+      const ticker   = sym.replace("USDT", "");
+      const price    = parseFloat(item.lastPrice)    || 0;
+      const prev     = parseFloat(item.prevPrice24h) || price;
+      const changeP  = parseFloat(item.price24hPcnt) * 100 || 0;
+
+      // Auto-generate name if not in our list
+      const autoName = ticker.replace(/X$/, "") + " Stock";
 
       stocks.push({
         symbol:    sym,
         ticker,
-        name:      NAMES[ticker],
+        name:      NAMES[ticker] ?? autoName,
         price,
         change:    price - prev,
         changeP,
@@ -86,7 +171,7 @@ app.get("/stocks", async (req, res) => {
       });
     }
 
-    // Sort known stocks first
+    // Sort: known names first, then by ticker
     stocks.sort((a, b) => {
       const aK = !!NAMES[a.ticker], bK = !!NAMES[b.ticker];
       if (aK && !bK) return -1;
@@ -94,23 +179,22 @@ app.get("/stocks", async (req, res) => {
       return a.ticker.localeCompare(b.ticker);
     });
 
-    // Update cache
-    cache = { stocks, lastFetch: Date.now() };
+    stockCache = { data: stocks, lastFetch: Date.now() };
     res.json({ source: "live", data: stocks });
 
   } catch (err) {
     console.error("GET /stocks error:", err.message);
-    if (cache.stocks) return res.json({ source: "stale", data: cache.stocks });
+    if (stockCache.data) return res.json({ source: "stale", data: stockCache.data });
     res.status(500).json({ error: err.message });
   }
 });
 
-// Candles for a specific stock
+// Candles for chart
 app.get("/candles/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
     const interval = req.query.interval || "D";
-    const limit    = req.query.limit    || 30;
+    const limit    = parseInt(req.query.limit) || 30;
 
     const response = await fetch(
       `${BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${interval}&limit=${limit}`
@@ -136,7 +220,7 @@ app.get("/candles/:symbol", async (req, res) => {
   }
 });
 
-// Single ticker price
+// Single ticker
 app.get("/ticker/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
@@ -168,17 +252,13 @@ app.get("/ticker/:symbol", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-
-// Debug — see raw Bybit response
+// Debug
 app.get("/debug", async (req, res) => {
-  const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
-  const json = await response.json();
-  const all = json.result.list.map(i => i.symbol);
-  const xstocks = all.filter(s => s.includes("AAPL") || s.includes("TSLA") || s.includes("NVDA") || s.endsWith("XUSDT") || s.includes("COINX"));
-  res.json({ total: all.length, xstocks, sample: all.slice(0, 30) });
+  const symbols = await getXStockSymbols();
+  res.json({ count: symbols.length, symbols });
 });
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ Inverte API running on port ${PORT}`);
+  console.log(`✅ Inverte API v2 running on port ${PORT}`);
 });
