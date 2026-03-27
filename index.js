@@ -175,8 +175,9 @@ const PORT = process.env.PORT || 3000;
 app.get("/debug", async (req, res) => {
   const response = await fetch(`${BASE}/v5/market/tickers?category=spot`);
   const json = await response.json();
-  const sample = json.result.list.slice(0, 20).map(i => i.symbol);
-  res.json({ total: json.result.list.length, sample });
+  const all = json.result.list.map(i => i.symbol);
+  const xstocks = all.filter(s => s.includes("AAPL") || s.includes("TSLA") || s.includes("NVDA") || s.endsWith("XUSDT") || s.includes("COINX"));
+  res.json({ total: all.length, xstocks, sample: all.slice(0, 30) });
 });
 
 app.listen(PORT, () => {
