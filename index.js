@@ -5,6 +5,7 @@ const { z }     = require("zod");
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 // ─── Rate Limiters ────────────────────────────────────────────────────────────
 
@@ -22,10 +23,18 @@ const strictLimiter = rateLimit({
   message: { error: "Rate limit exceeded." }
 });
 
-app.use("/stocks",  limiter);
-app.use("/candles", limiter);
-app.use("/ticker",  limiter);
-app.use("/debug",   strictLimiter);
+// Waitlist: max 3 submissions per IP per hour
+const waitlistLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  message: { error: "Too many signups from this IP." }
+});
+
+app.use("/stocks",   limiter);
+app.use("/candles",  limiter);
+app.use("/ticker",   limiter);
+app.use("/debug",    strictLimiter);
+app.use("/waitlist", waitlistLimiter);
 
 // ─── Validation Schemas ───────────────────────────────────────────────────────
 
@@ -34,6 +43,14 @@ const symbolSchema = z.string()
   .max(20);
 
 const rangeSchema = z.enum(["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "ALL"]);
+
+const waitlistSchema = z.object({
+  email:    z.string().email("Invalid email address").max(254),
+  language: z.enum(["ES", "EN"]).optional().default("ES"),
+  source:   z.string().max(50).optional().default("Website"),
+  // honeypot — bots fill this, humans don't
+  website:  z.string().max(0, "Bot detected").optional(),
+});
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -132,7 +149,40 @@ function getIntervalConfig(range) {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "Inverte API", version: "9.1.0" });
+  res.json({ status: "ok", service: "Inverte API", version: "9.2.0" });
+});
+
+// POST /waitlist — validates email, blocks bots, forwards to Google Apps Script
+app.post("/waitlist", async (req, res) => {
+  // Validate and sanitize input
+  const result = waitlistSchema.safeParse(req.body);
+  if (!result.success) {
+    // Return 200 even for honeypot hits so bots don't know they were caught
+    const isBotHit = result.error.issues.some(i => i.message === "Bot detected");
+    if (isBotHit) return res.status(200).json({ ok: true });
+    return res.status(400).json({ error: result.error.issues[0].message });
+  }
+
+  const { email, language, source } = result.data;
+
+  // Forward to Google Apps Script (URL lives in env, never in client code)
+  const scriptUrl = process.env.GOOGLE_SCRIPT_URL;
+  if (!scriptUrl) {
+    console.error("GOOGLE_SCRIPT_URL not set");
+    return res.status(500).json({ error: "Server misconfiguration" });
+  }
+
+  try {
+    await fetch(scriptUrl, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ email, language, source }),
+    });
+    res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("Waitlist forward error:", err.message);
+    res.status(500).json({ error: "Failed to save signup" });
+  }
 });
 
 app.get("/stocks", async (req, res) => {
@@ -188,7 +238,6 @@ app.get("/stocks", async (req, res) => {
 });
 
 app.get("/candles/:symbol", async (req, res) => {
-  // Validate inputs before touching Bybit
   const symResult   = symbolSchema.safeParse(req.params.symbol);
   const rangeResult = rangeSchema.safeParse(req.query.range || "1M");
 
@@ -227,7 +276,6 @@ app.get("/candles/:symbol", async (req, res) => {
 });
 
 app.get("/ticker/:symbol", async (req, res) => {
-  // Validate symbol before touching Bybit
   const symResult = symbolSchema.safeParse(req.params.symbol);
   if (!symResult.success) return res.status(400).json({ error: "Invalid symbol format" });
 
@@ -300,4 +348,4 @@ app.get("/debug", async (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Inverte API v9.1 on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Inverte API v9.2 on port ${PORT}`));
