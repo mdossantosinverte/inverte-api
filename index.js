@@ -3,11 +3,36 @@ const cors = require("cors");
 
 const app = express();
 app.use(cors());
+const rateLimit = require("express-rate-limit");
 
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,                  // max 100 requests per IP per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please slow down." }
+});
+
+const strictLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10,             // debug endpoint: max 10 req/min
+  message: { error: "Rate limit exceeded." }
+});
+
+app.use("/stocks", limiter);
+app.use("/candles", limiter);
+app.use("/ticker", limiter);
+app.use("/debug", strictLimiter); // stricter on debug
 const BASE = "https://api.bybit.com";
 
 let stockCache = { data: null, lastFetch: 0 };
 const CACHE_TTL = 30_000;
+
+const tickerCache = new Map(); // symbol -> { data, ts }
+const TICKER_TTL  = 10_000;   // 10 seconds
+
+const candleCache = new Map(); // `${symbol}_${range}` -> { data, ts }
+const CANDLE_TTL  = 60_000;   // 1 minute (candles don't change fast)
 
 // These are confirmed xStock symbols on Bybit — verified from Bybit's own pages
 // We use a CONFIRMED list + also dynamically check for any new ones via the API
@@ -150,15 +175,23 @@ app.get("/stocks", async (req, res) => {
 app.get("/candles/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
-    const cfg = getIntervalConfig(req.query.range || "1M");
+    const range = req.query.range || "1M";
+    const key = `${symbol}_${range}`;
+    const cached = candleCache.get(key);
+    if (cached && Date.now() - cached.ts < CANDLE_TTL) {
+      return res.json({ source: "cache", data: cached.data });
+    }
+
+    const cfg = getIntervalConfig(range);
     const r = await fetch(`${BASE}/v5/market/kline?category=spot&symbol=${symbol}&interval=${cfg.interval}&limit=${cfg.limit}`);
     const json = await r.json();
     if (json.retCode !== 0) throw new Error(json.retMsg);
-    const candles = json.result.list.reverse().map(c => ({
+    const data = json.result.list.reverse().map(c => ({
       time: parseInt(c[0]), open: parseFloat(c[1]),
       high: parseFloat(c[2]), low: parseFloat(c[3]), close: parseFloat(c[4]),
     }));
-    res.json({ data: candles });
+    candleCache.set(key, { data, ts: Date.now() });
+    res.json({ source: "live", data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -167,19 +200,26 @@ app.get("/candles/:symbol", async (req, res) => {
 app.get("/ticker/:symbol", async (req, res) => {
   try {
     const { symbol } = req.params;
-    const r = await fetch(`${BASE}/v5/market/tickers?category=spot&symbol=${symbol}`);
+    const cached = tickerCache.get(symbol);
+    if (cached && Date.now() - cached.ts < TICKER_TTL) {
+      return res.json({ source: "cache", data: cached.data });
+    }
+
+    const r    = await fetch(`${BASE}/v5/market/tickers?category=spot&symbol=${symbol}`);
     const json = await r.json();
     if (json.retCode !== 0) throw new Error(json.retMsg);
     const item  = json.result.list[0];
     const price = parseFloat(item.lastPrice) || 0;
     const prev  = parseFloat(item.prevPrice24h) || price;
-    res.json({ data: {
+    const data  = {
       price, change: price - prev,
       changeP:   parseFloat(item.price24hPcnt) * 100 || 0,
       high24h:   parseFloat(item.highPrice24h) || 0,
       low24h:    parseFloat(item.lowPrice24h)  || 0,
       volume24h: parseFloat(item.volume24h)    || 0,
-    }});
+    };
+    tickerCache.set(symbol, { data, ts: Date.now() });
+    res.json({ source: "live", data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -188,6 +228,9 @@ app.get("/ticker/:symbol", async (req, res) => {
 // Raw dump — shows everything ending in XUSDT with price > $5
 // Use this to discover new xStocks Bybit adds
 app.get("/debug", async (req, res) => {
+  if (req.query.key !== process.env.DEBUG_KEY) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
   try {
     const r = await fetch(`${BASE}/v5/market/tickers?category=spot`);
     const json = await r.json();
